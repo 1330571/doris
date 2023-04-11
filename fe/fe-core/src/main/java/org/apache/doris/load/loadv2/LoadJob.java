@@ -111,7 +111,8 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
     // 99: all of tasks have been finished
     // 100: txn status is visible and load has been finished
     protected int progress;
-
+    protected int totalScanner;
+    protected int finishedScanner;
     // non-persistence
     // This param is set true during txn is committing.
     // During committing, the load job could not be cancelled.
@@ -147,6 +148,11 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
         // load task id -> fragment id -> load bytes
         private Table<TUniqueId, TUniqueId, Long> loadBytes = HashBasedTable.create();
 
+        // load task id -> fragment id -> finished scanners
+        private Table<TUniqueId, TUniqueId, Long> finishedScanners = HashBasedTable.create();
+        // load task id -> fragment id -> total scanners
+        private Table<TUniqueId, TUniqueId, Long> totalScanners = HashBasedTable.create();
+
         // load task id -> unfinished backend id list
         private Map<TUniqueId, List<Long>> unfinishedBackendIds = Maps.newHashMap();
         // load task id -> all backend id list
@@ -166,6 +172,14 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
             for (TUniqueId fragId : fragmentIds) {
                 loadBytes.put(loadId, fragId, 0L);
             }
+            finishedScanners.rowMap().remove(loadId);
+            for (TUniqueId fragId : fragmentIds) {
+                finishedScanners.put(loadId, fragId, 0L);
+            }
+            totalScanners.rowMap().remove(loadId);
+            for (TUniqueId fragId : fragmentIds) {
+                totalScanners.put(loadId, fragId, 0L);
+            }
             allBackendIds.put(loadId, relatedBackendIds);
             // need to get a copy of relatedBackendIds, so that when we modify the "relatedBackendIds" in
             // allBackendIds, the list in unfinishedBackendIds will not be changed.
@@ -175,12 +189,26 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
         public synchronized void removeLoad(TUniqueId loadId) {
             counterTbl.rowMap().remove(loadId);
             loadBytes.rowMap().remove(loadId);
+            finishedScanners.rowMap().remove(loadId);
+            totalScanners.rowMap().remove(loadId);
             unfinishedBackendIds.remove(loadId);
             allBackendIds.remove(loadId);
         }
 
+        public synchronized void updateScannerProgress(long backendId, TUniqueId loadId, TUniqueId fragmentId,
+                long rows, long finishedScanner, long totalScanner) {
+            if (finishedScanners.contains(loadId, fragmentId)) {
+                finishedScanners.put(loadId, fragmentId, finishedScanner);
+            }
+
+            if (totalScanners.contains(loadId, fragmentId)) {
+                totalScanners.put(loadId, fragmentId, totalScanner);
+            }
+        }
+
         public synchronized void updateLoadProgress(long backendId, TUniqueId loadId, TUniqueId fragmentId,
-                                                    long rows, long bytes, boolean isDone) {
+                                                    long rows, long totalScanner, long finishedScanner,
+                                                    long bytes, boolean isDone) {
             if (counterTbl.contains(loadId, fragmentId)) {
                 counterTbl.put(loadId, fragmentId, rows);
             }
@@ -188,6 +216,8 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
             if (loadBytes.contains(loadId, fragmentId)) {
                 loadBytes.put(loadId, fragmentId, bytes);
             }
+
+            this.updateScannerProgress(backendId, loadId, fragmentId, rows, finishedScanner, totalScanner);
             if (isDone && unfinishedBackendIds.containsKey(loadId)) {
                 unfinishedBackendIds.get(loadId).remove(backendId);
             }
@@ -201,12 +231,24 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
             return total;
         }
 
-        public synchronized long getLoadBytes() {
+        public synchronized long getSumOfHashTable(Table<TUniqueId, TUniqueId, Long> t) {
             long total = 0;
-            for (long bytes : loadBytes.values()) {
-                total += bytes;
+            for (long v : t.values()) {
+                total += v;
             }
             return total;
+        }
+
+        public synchronized long getLoadBytes() {
+            return getSumOfHashTable(loadBytes);
+        }
+
+        public synchronized long getFinishedScanners() {
+            return getSumOfHashTable(finishedScanners);
+        }
+
+        public synchronized  long getTotalScanners() {
+            return getSumOfHashTable(totalScanners);
         }
 
         public synchronized String toJson() {
@@ -317,8 +359,10 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
     }
 
     public void updateProgress(Long beId, TUniqueId loadId, TUniqueId fragmentId, long scannedRows,
-                               long scannedBytes, boolean isDone) {
-        loadStatistic.updateLoadProgress(beId, loadId, fragmentId, scannedRows, scannedBytes, isDone);
+                                long totalScanner, long finishedScanner,
+                                long scannedBytes, boolean isDone) {
+        loadStatistic.updateLoadProgress(beId, loadId, fragmentId, scannedRows, totalScanner,
+                finishedScanner, scannedBytes, isDone);
     }
 
     public void setLoadFileInfo(int fileNum, long fileSize) {
@@ -774,7 +818,7 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
                     jobInfo.add("ETL:100%; LOAD:" + progress + "%");
                     break;
             }
-
+            jobInfo.add(finishedScanner + "/" + totalScanner);
             // type
             jobInfo.add(jobType);
 

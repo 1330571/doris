@@ -369,6 +369,7 @@ bool NewOlapScanNode::_should_push_down_common_expr() {
 //}
 // every doris_scan_range is related with one tablet so that one olap scan node contains multiple tablet
 void NewOlapScanNode::set_scan_ranges(const std::vector<TScanRangeParams>& scan_ranges) {
+    _state->update_num_scan_ranges_total(scan_ranges.size());
     for (auto& scan_range : scan_ranges) {
         DCHECK(scan_range.scan_range.__isset.palo_scan_range);
         _scan_ranges.emplace_back(new TPaloScanRange(scan_range.scan_range.palo_scan_range));
